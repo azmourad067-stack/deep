@@ -1,16 +1,3 @@
-"""
-QuantTurf Pro v3.1.1 FINAL — Production Edition
-================================================
-✅ Driver Music Parsing (fully integrated)
-✅ Trainer Music Parsing (fully integrated)
-✅ Removed: Age, Sex, Weight
-✅ Table-based Input (modern UI)
-✅ Recalibrated Weights (optimized for 3 music sources)
-✅ Real-time Editable Results
-
-Author: QuantTurf Analytics
-Version: 3.1.1 (Final Production)
-"""
 
 import streamlit as st
 import numpy as np
