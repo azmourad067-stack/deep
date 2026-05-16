@@ -777,21 +777,33 @@ def main() -> None:
         st.markdown("---\n## 🐎 Partants (Tableau Éditable)")
         st.markdown("*Copier/coller depuis Excel. Modifiez directement.*")
         
-        # Initialize session state
+        # Initialize session state with clean column names (no special chars)
         if "horses_df" not in st.session_state:
             st.session_state.horses_df = pd.DataFrame({
-                "N°": range(1, 11),
-                "Nom": [f"Cheval {i+1}" for i in range(10)],
-                "Cote": [5.0] * 10,
-                "Musique Cheval": [""] * 10,
-                "Musique Driver": [""] * 10,
-                "Musique Entraîneur": [""] * 10,
-                "Corde": [0] * 10,
+                "num": range(1, 11),
+                "nom": [f"Cheval {i+1}" for i in range(10)],
+                "cote": [5.0] * 10,
+                "musique_cheval": [""] * 10,
+                "musique_driver": [""] * 10,
+                "musique_entraineur": [""] * 10,
+                "corde": [0] * 10,
             })
         
-        # Editable table
+        # Define column configuration for display
+        column_config = {
+            "num": st.column_config.NumberColumn("N°", help="Numéro du cheval", required=True),
+            "nom": st.column_config.TextColumn("Nom", help="Nom du cheval", required=True),
+            "cote": st.column_config.NumberColumn("Cote", help="Cote (ex: 5.5)", format="%.2f"),
+            "musique_cheval": st.column_config.TextColumn("Musique Cheval", help="Ex: 2a 1p 3m"),
+            "musique_driver": st.column_config.TextColumn("Musique Driver", help="Ex: 1a 2p"),
+            "musique_entraineur": st.column_config.TextColumn("Musique Entraîneur", help="Ex: 3a 1p"),
+            "corde": st.column_config.NumberColumn("Corde", help="Numéro de corde (Plat uniquement)", format="%d"),
+        }
+        
+        # Editable table with clean column names and custom display
         edited_df = st.data_editor(
             st.session_state.horses_df,
+            column_config=column_config,
             use_container_width=True,
             num_rows="dynamic",
             key="horses_editor"
@@ -805,70 +817,38 @@ def main() -> None:
                 st.error("❌ Minimum 2 partants")
                 return
             
-            # ----- CORRECTION : nettoyage et mapping robuste des colonnes -----
-            # Nettoyer les noms de colonnes (espaces, caractères invisibles)
-            edited_df.columns = edited_df.columns.str.strip().str.replace(r'[^\w\s]', '', regex=True)
-            
-            # Cartographie des colonnes attendues (alias possibles)
-            col_mapping = {
-                'N°': ['N°', 'Numero', 'Num', 'N', 'No'],
-                'Nom': ['Nom', 'Cheval', 'Name'],
-                'Cote': ['Cote', 'Odds', 'Côte', 'Prob'],
-                'Musique Cheval': ['Musique Cheval', 'Music Horse', 'Musique', 'Cheval Musique'],
-                'Musique Driver': ['Musique Driver', 'Music Driver', 'Driver Musique', 'Jockey Musique'],
-                'Musique Entraîneur': ['Musique Entraîneur', 'Music Trainer', 'Entraineur Musique', 'Trainer Music'],
-                'Corde': ['Corde', 'Draw', 'Stall', 'Box', 'Numéro de corde']
-            }
-            
-            # Trouver les vraies colonnes dans le DataFrame
-            actual_cols = {}
-            for target, aliases in col_mapping.items():
-                for alias in aliases:
-                    if alias in edited_df.columns:
-                        actual_cols[target] = alias
-                        break
-                if target not in actual_cols:
-                    # Si colonne manquante, on la crée avec des valeurs par défaut
-                    st.warning(f"⚠️ Colonne '{target}' non trouvée. Valeurs par défaut utilisées.")
-                    if target == 'Cote':
-                        edited_df[target] = 5.0
-                    elif target == 'Corde':
-                        edited_df[target] = 0
-                    else:
-                        edited_df[target] = ''
-                    actual_cols[target] = target
-            
-            # Fonctions de conversion robustes
-            def to_float(val, default=0.0):
-                if pd.isna(val) or val == '' or val is None:
-                    return default
-                try:
-                    s = str(val).strip().replace(',', '.')
-                    return float(s)
-                except:
-                    return default
-            
-            def to_int(val, default=0):
-                if pd.isna(val) or val == '' or val is None:
-                    return default
-                try:
-                    s = str(val).strip()
-                    # Garder seulement chiffres (supprime lettres si '1A' -> 1)
-                    s = ''.join(c for c in s if c.isdigit())
-                    return int(s) if s else default
-                except:
-                    return default
-            
+            # Mapping from internal column names to expected fields
+            # We'll use the internal names directly
             horses_input = []
             for idx, row in edited_df.iterrows():
                 try:
-                    number = to_int(row[actual_cols['N°']], default=idx+1)
-                    name = str(row[actual_cols['Nom']]).strip() if not pd.isna(row[actual_cols['Nom']]) else f"Cheval {number}"
-                    odds = to_float(row[actual_cols['Cote']], default=5.0)
-                    horse_music = str(row[actual_cols['Musique Cheval']]).strip() if not pd.isna(row[actual_cols['Musique Cheval']]) else ''
-                    driver_music = str(row[actual_cols['Musique Driver']]).strip() if not pd.isna(row[actual_cols['Musique Driver']]) else ''
-                    trainer_music = str(row[actual_cols['Musique Entraîneur']]).strip() if not pd.isna(row[actual_cols['Musique Entraîneur']]) else ''
-                    draw = to_int(row[actual_cols['Corde']], default=0)
+                    # Helper functions
+                    def to_float(val, default=0.0):
+                        if pd.isna(val) or val == '' or val is None:
+                            return default
+                        try:
+                            s = str(val).strip().replace(',', '.')
+                            return float(s)
+                        except:
+                            return default
+                    
+                    def to_int(val, default=0):
+                        if pd.isna(val) or val == '' or val is None:
+                            return default
+                        try:
+                            s = str(val).strip()
+                            s = ''.join(c for c in s if c.isdigit())
+                            return int(s) if s else default
+                        except:
+                            return default
+                    
+                    number = to_int(row.get("num"), default=idx+1)
+                    name = str(row.get("nom", "")).strip() if not pd.isna(row.get("nom")) else f"Cheval {number}"
+                    odds = to_float(row.get("cote"), default=5.0)
+                    horse_music = str(row.get("musique_cheval", "")).strip() if not pd.isna(row.get("musique_cheval")) else ''
+                    driver_music = str(row.get("musique_driver", "")).strip() if not pd.isna(row.get("musique_driver")) else ''
+                    trainer_music = str(row.get("musique_entraineur", "")).strip() if not pd.isna(row.get("musique_entraineur")) else ''
+                    draw = to_int(row.get("corde"), default=0)
                     
                     horses_input.append({
                         "number": number,
@@ -882,7 +862,6 @@ def main() -> None:
                 except Exception as e:
                     st.error(f"❌ Erreur à la ligne {idx}: {str(e)}")
                     return
-            # ----- FIN CORRECTION -----
             
             with st.spinner("Analyse en cours..."):
                 try:
