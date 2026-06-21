@@ -594,7 +594,18 @@ def _pmu_estimated_odds(p: float, bet_type: str,
 
 def analyze_exotics(results: List[Dict], orders: np.ndarray,
                      top_n: int = 10) -> Dict[str, List[Dict]]:
-    """Calcule les meilleurs paris exotiques avec cotes PMU réalistes."""
+    """
+    Calcule les meilleurs paris exotiques avec cotes PMU réalistes.
+
+    IMPORTANT (fix v4.1.1) : `orders` contient des indices dans l'espace
+    ORIGINAL des chevaux (ordre de construction des features, avant tri),
+    alors que `results` est trié par win_prob décroissant et n'est donc
+    PAS indexé de la même façon. v4.0/v4.1.0 indexaient `results[i]`
+    directement avec les indices de `orders`, ce qui associait le mauvais
+    cheval à la mauvaise probabilité dans TOUS les paris exotiques (bug
+    silencieux, détecté par backtest manuel le 21/06/2026). On reconstruit
+    ici un mapping explicite original_index -> entrée results.
+    """
     n_iter, n_horses = orders.shape
     output = {"couple_gagnant": [], "couple_place": [],
               "trio_ordre": [], "trio_desordre": [],
@@ -602,6 +613,9 @@ def analyze_exotics(results: List[Dict], orders: np.ndarray,
 
     if n_horses < 3:
         return output
+
+    # Mapping indice original (ordre de construction des features) -> résultat
+    by_orig_idx = sorted(results, key=lambda r: r["_orig_idx"])
 
     cg = {}
     for it in range(n_iter):
@@ -612,8 +626,8 @@ def analyze_exotics(results: List[Dict], orders: np.ndarray,
         if p < 0.005: continue
         est_odds = _pmu_estimated_odds(p, "couple_gagnant", 3.0, 400.0)
         output["couple_gagnant"].append({
-            "combo": f"{results[i]['number']}-{results[j]['number']}",
-            "names": f"{results[i]['name'][:8]} → {results[j]['name'][:8]}",
+            "combo": f"{by_orig_idx[i]['number']}-{by_orig_idx[j]['number']}",
+            "names": f"{by_orig_idx[i]['name'][:8]} → {by_orig_idx[j]['name'][:8]}",
             "prob_pct": round(p * 100, 2),
             "estimated_odds": round(est_odds, 1),
             "expected_roi": round(expected_roi(p, est_odds, 10), 1),
@@ -630,8 +644,8 @@ def analyze_exotics(results: List[Dict], orders: np.ndarray,
         if p < 0.02: continue
         est_odds = _pmu_estimated_odds(p, "couple_place", 1.8, 80.0)
         output["couple_place"].append({
-            "combo": f"{results[i]['number']}-{results[j]['number']}",
-            "names": f"{results[i]['name'][:8]} & {results[j]['name'][:8]}",
+            "combo": f"{by_orig_idx[i]['number']}-{by_orig_idx[j]['number']}",
+            "names": f"{by_orig_idx[i]['name'][:8]} & {by_orig_idx[j]['name'][:8]}",
             "prob_pct": round(p * 100, 2),
             "estimated_odds": round(est_odds, 1),
             "expected_roi": round(expected_roi(p, est_odds, 10), 1),
@@ -647,7 +661,7 @@ def analyze_exotics(results: List[Dict], orders: np.ndarray,
         est_odds = _pmu_estimated_odds(p, "trio_ordre", 10.0, 2000.0)
         i, j, k = key
         output["trio_ordre"].append({
-            "combo": f"{results[i]['number']}-{results[j]['number']}-{results[k]['number']}",
+            "combo": f"{by_orig_idx[i]['number']}-{by_orig_idx[j]['number']}-{by_orig_idx[k]['number']}",
             "prob_pct": round(p * 100, 3),
             "estimated_odds": round(est_odds, 1),
             "expected_roi": round(expected_roi(p, est_odds, 10), 1),
@@ -663,7 +677,7 @@ def analyze_exotics(results: List[Dict], orders: np.ndarray,
         est_odds = _pmu_estimated_odds(p, "trio_desordre", 4.0, 500.0)
         i, j, k = key
         output["trio_desordre"].append({
-            "combo": f"{results[i]['number']}-{results[j]['number']}-{results[k]['number']}",
+            "combo": f"{by_orig_idx[i]['number']}-{by_orig_idx[j]['number']}-{by_orig_idx[k]['number']}",
             "prob_pct": round(p * 100, 2),
             "estimated_odds": round(est_odds, 1),
             "expected_roi": round(expected_roi(p, est_odds, 10), 1),
@@ -679,7 +693,7 @@ def analyze_exotics(results: List[Dict], orders: np.ndarray,
             if p < 0.005: continue
             est_odds = _pmu_estimated_odds(p, "quarte_desordre", 12.0, 5000.0)
             output["quarte_desordre"].append({
-                "combo": "-".join(str(results[i]['number']) for i in key),
+                "combo": "-".join(str(by_orig_idx[i]['number']) for i in key),
                 "prob_pct": round(p * 100, 3),
                 "estimated_odds": round(est_odds, 1),
                 "expected_roi": round(expected_roi(p, est_odds, 5), 1),
@@ -695,7 +709,7 @@ def analyze_exotics(results: List[Dict], orders: np.ndarray,
             if p < 0.002: continue
             est_odds = _pmu_estimated_odds(p, "quinte_desordre", 25.0, 30000.0)
             output["quinte_desordre"].append({
-                "combo": "-".join(str(results[i]['number']) for i in key),
+                "combo": "-".join(str(by_orig_idx[i]['number']) for i in key),
                 "prob_pct": round(p * 100, 4),
                 "estimated_odds": round(est_odds, 1),
                 "expected_roi": round(expected_roi(p, est_odds, 2), 1),
@@ -903,6 +917,7 @@ class RaceEngine:
 
             results.append({
                 "rank": 0,
+                "_orig_idx": i,
                 "number": horse.get("number", i + 1),
                 "name": horse.get("name", f"Cheval {i+1}"),
                 "odds": float(horse.get("odds", 0)),
