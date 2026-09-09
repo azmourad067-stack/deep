@@ -1,501 +1,301 @@
-import streamlit as st
+import re
 import pandas as pd
 import numpy as np
-import plotly.express as px
 import requests
-import json
-from datetime import datetime, timedelta
-import time
+from bs4 import BeautifulSoup
+import streamlit as st
+import plotly.express as px
 
-# Configuration de la page
+# =============================================================================
+# 1. DONNÉES ET CHARGEMENT
+# =============================================================================
+
+DEFAULT_COLUMNS = [
+    "cheval", "jockey", "entraineur", "cote", 
+    "forme_cheval", "forme_jockey", "aptitude_distance", "aptitude_terrain"
+]
+
+def parse_float(val, default=0.5) -> float:
+    """Nettoie une chaîne de caractères pour extraire un nombre flottant."""
+    if pd.isna(val):
+        return default
+    val_str = str(val).replace(",", ".")
+    match = re.search(r"[-+]?\d*\.\d+|\d+", val_str)
+    return float(match.group()) if match else default
+
+def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Impute les valeurs manquantes et borne les scores entre 0 et 1."""
+    df["cote"] = pd.to_numeric(df["cote"].apply(lambda x: parse_float(x, default=10.0)), errors="coerce").fillna(10.0)
+    df["cote"] = df["cote"].clip(lower=1.01)
+    
+    score_cols = ["forme_cheval", "forme_jockey", "aptitude_distance", "aptitude_terrain"]
+    for col in score_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col].apply(lambda x: parse_float(x, default=0.5)), errors="coerce").fillna(0.5)
+            df[col] = df[col].clip(lower=0.0, upper=1.0)
+        else:
+            df[col] = 0.5
+            
+    return df
+
+def load_sample_data() -> pd.DataFrame:
+    """Génère un jeu de données de démonstration crédible."""
+    data = [
+        {"cheval": "Galactic Star", "jockey": "C. Soumillon", "entraineur": "J.C. Rouget", "cote": 3.2, "forme_cheval": 0.85, "forme_jockey": 0.78, "aptitude_distance": 0.90, "aptitude_terrain": 0.85},
+        {"cheval": "Ocean Wave", "jockey": "M. Guyon", "entraineur": "A. Fabre", "cote": 4.5, "forme_cheval": 0.78, "forme_jockey": 0.82, "aptitude_distance": 0.80, "aptitude_terrain": 0.75},
+        {"cheval": "Thunder Bolt", "jockey": "S. Pasquier", "entraineur": "P. Bary", "cote": 6.0, "forme_cheval": 0.65, "forme_jockey": 0.70, "aptitude_distance": 0.70, "aptitude_terrain": 0.80},
+        {"cheval": "Iron Spirit", "jockey": "A. Lemaitre", "entraineur": "C. Ferland", "cote": 8.5, "forme_cheval": 0.60, "forme_jockey": 0.65, "aptitude_distance": 0.85, "aptitude_terrain": 0.60},
+        {"cheval": "Royal King", "jockey": "T. Bachelot", "entraineur": "H.A. Pantall", "cote": 12.0, "forme_cheval": 0.55, "forme_jockey": 0.58, "aptitude_distance": 0.60, "aptitude_terrain": 0.65},
+        {"cheval": "Fast Shadow", "jockey": "G. Benoist", "entraineur": "F. Chappet", "cote": 18.0, "forme_cheval": 0.45, "forme_jockey": 0.50, "aptitude_distance": 0.50, "aptitude_terrain": 0.55},
+        {"cheval": "Silver Arrow", "jockey": "R. Thomas", "entraineur": "C. Rossi", "cote": 25.0, "forme_cheval": 0.40, "forme_jockey": 0.45, "aptitude_distance": 0.40, "aptitude_terrain": 0.50},
+        {"cheval": "Dark Legend", "jockey": "E. Hardouin", "entraineur": "M. Delcher", "cote": 34.0, "forme_cheval": 0.30, "forme_jockey": 0.40, "aptitude_distance": 0.45, "aptitude_terrain": 0.40},
+    ]
+    return pd.DataFrame(data)
+
+def parse_uploaded_csv(uploaded_file) -> pd.DataFrame:
+    """Charge et valide un fichier CSV fourni par l'utilisateur."""
+    try:
+        df = pd.read_csv(uploaded_file)
+        df.columns = [col.strip().lower().replace(" ", "_") for col in df.columns]
+        
+        missing_cols = [col for col in DEFAULT_COLUMNS if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Colonnes manquantes dans le CSV : {', '.join(missing_cols)}")
+            
+        return clean_dataframe(df)
+    except Exception as e:
+        raise ValueError(f"Erreur lors du traitement du fichier CSV : {str(e)}")
+
+def fetch_web_race_data(url: str) -> pd.DataFrame:
+    """Scraping basique d'un tableau HTML de course."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, "html.parser")
+        
+        rows = []
+        table = soup.find("table")
+        if not table:
+            raise ValueError("Aucune table HTML trouvée sur l'URL fournie.")
+            
+        for tr in table.find_all("tr")[1:]:
+            cols = [td.text.strip() for td in tr.find_all("td")]
+            if len(cols) >= 4:
+                rows.append({
+                    "cheval": cols[0],
+                    "jockey": cols[1],
+                    "entraineur": cols[2] if len(cols) > 2 else "Inconnu",
+                    "cote": parse_float(cols[3], default=10.0),
+                    "forme_cheval": 0.5,
+                    "forme_jockey": 0.5,
+                    "aptitude_distance": 0.5,
+                    "aptitude_terrain": 0.5
+                })
+        
+        if not rows:
+            raise ValueError("Impossible d'extraire des lignes valides.")
+            
+        return clean_dataframe(pd.DataFrame(rows))
+    except Exception as e:
+        raise RuntimeError(f"Échec de la récupération Web : {str(e)}")
+
+# =============================================================================
+# 2. MOTEUR STATISTIQUE & MODÈLE
+# =============================================================================
+
+class HorseRacingModel:
+    """Modèle probabiliste de Bradley-Terry / Softmax avec approximation de Harville."""
+    
+    def __init__(self, weights: dict = None, temperature: float = 1.0):
+        self.weights = weights or {
+            "implied_prob": 0.40,
+            "forme_cheval": 0.25,
+            "forme_jockey": 0.15,
+            "aptitude_distance": 0.10,
+            "aptitude_terrain": 0.10
+        }
+        self.temperature = temperature
+
+    def _normalize_odds_probabilities(self, odds: pd.Series) -> pd.Series:
+        raw_prob = 1.0 / odds
+        return raw_prob / raw_prob.sum()
+
+    def predict(self, df: pd.DataFrame) -> pd.DataFrame:
+        data = df.copy()
+        data["prob_marche"] = self._normalize_odds_probabilities(data["cote"])
+        
+        # Calcul de la fonction d'utilité
+        data["latent_score"] = (
+            self.weights["implied_prob"] * data["prob_marche"] +
+            self.weights["forme_cheval"] * data["forme_cheval"] +
+            self.weights["forme_jockey"] * data["forme_jockey"] +
+            self.weights["aptitude_distance"] * data["aptitude_distance"] +
+            self.weights["aptitude_terrain"] * data["aptitude_terrain"]
+        )
+        
+        # Normalisation Softmax
+        exp_scores = np.exp(data["latent_score"] / self.temperature)
+        data["prob_victoire"] = exp_scores / np.sum(exp_scores)
+        
+        # Place (Top 3) via Harville
+        data["prob_place"] = self._calculate_harville_top3(data["prob_victoire"].values)
+        
+        # Métriques de valeur
+        data["cote_equitable"] = 1.0 / data["prob_victoire"]
+        data["expected_value"] = (data["prob_victoire"] * data["cote"]) - 1.0
+        data["explication"] = data.apply(self._generate_reasoning, axis=1)
+        
+        return data.sort_values(by="prob_victoire", ascending=False).reset_index(drop=True)
+
+    def _calculate_harville_top3(self, win_probs: np.ndarray) -> np.ndarray:
+        n = len(win_probs)
+        if n < 3:
+            return np.minimum(1.0, win_probs * n)
+            
+        place_probs = np.zeros(n)
+        for i in range(n):
+            p1 = win_probs[i]
+            p2_sum = 0.0
+            p3_sum = 0.0
+            for j in range(n):
+                if j != i:
+                    p2_sum += (win_probs[j] * p1) / (1.0 - win_probs[j])
+            for j in range(n):
+                for k in range(n):
+                    if j != i and k != i and j != k:
+                        denom1 = 1.0 - win_probs[j]
+                        denom2 = 1.0 - win_probs[j] - win_probs[k]
+                        if denom1 > 0 and denom2 > 0:
+                            p3_sum += (win_probs[j] * win_probs[k] * p1) / (denom1 * denom2)
+                            
+            place_probs[i] = p1 + p2_sum + p3_sum
+            
+        return np.clip(place_probs, 0.0, 0.99)
+
+    def _generate_reasoning(self, row: pd.Series) -> str:
+        reasons = []
+        if row["expected_value"] > 0.15:
+            reasons.append("Cote surévaluée par le marché (Value Bet).")
+        if row["forme_cheval"] >= 0.75:
+            reasons.append("Excellente forme récente du cheval.")
+        if row["forme_jockey"] >= 0.75:
+            reasons.append("Jockey très performant actuellement.")
+        if row["aptitude_distance"] >= 0.8 and row["aptitude_terrain"] >= 0.8:
+            reasons.append("Adéquation optimale avec les conditions (distance & terrain).")
+        if not reasons:
+            reasons.append("Profil équilibré sans avantage majeur.")
+        return " | ".join(reasons)
+
+# =============================================================================
+# 3. INTERFACE UTILISATEUR STREAMLIT
+# =============================================================================
+
 st.set_page_config(
-    page_title="Pronostic Hippique Pro - API PMU",
-    page_icon="🐴",
+    page_title="TurfPredict — Pronostics Hippiques",
+    page_icon="🏇",
     layout="wide"
 )
 
-# === TITRE ===
-st.title("🏇 Outil de Pronostic Hippique avec données PMU")
-st.markdown("---")
+st.title("🏇 TurfPredict — Moteur Statistiques & Pronostics Hippiques")
+st.caption("Modélisation probabiliste et détection de valeur pour courses hippiques.")
 
-# === INITIALISATION DES SESSIONS ===
-if 'chevaux' not in st.session_state:
-    st.session_state.chevaux = pd.DataFrame(columns=[
-        'Nom', 'Numero', 'Forme_recente', 'Perf_distance', 'Perf_piste',
-        'Poids', 'Jockey', 'Entraineur', 'Fraicheur', 'Cote', 'Corde',
-        'Victoires', 'Places', 'Gains'
-    ])
-
-if 'poids_param' not in st.session_state:
-    st.session_state.poids_param = {
-        'Forme_recente': 25,
-        'Perf_distance': 20,
-        'Perf_piste': 15,
-        'Poids': 10,
-        'Cote': 10,
-        'Jockey': 8,
-        'Entraineur': 6,
-        'Fraicheur': 6
-    }
-
-if 'donnees_pmu' not in st.session_state:
-    st.session_state.donnees_pmu = None
-
-# === FONCTIONS ===
-def nettoyer_nom(nom):
-    """Nettoie le nom d'un cheval pour comparaison"""
-    return nom.strip().upper().replace(' ', '').replace("'", "")
-
-def appel_api_pmu(date_str, reunion_num):
-    """
-    Appelle l'API PMU pour récupérer les données d'une réunion
-    date_str: format DDMMYYYY
-    reunion_num: 1, 2, 3...
-    """
-    try:
-        url = f"https://online.turfinfo.api.pmu.fr/rest/client/61/programme/{date_str}/R{reunion_num}?specialisation=INTERNET"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(url, headers=headers, timeout=15)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            st.error(f"❌ Erreur API PMU : {response.status_code}")
-            return None
-    except Exception as e:
-        st.error(f"❌ Erreur de connexion : {str(e)}")
-        return None
-
-def extraire_chevaux_api(donnees):
-    """Extrait les chevaux d'une course depuis les données PMU"""
-    chevaux = []
-    
-    try:
-        # Navigation dans la structure JSON
-        courses = donnees.get('programme', {}).get('courses', [])
-        
-        if not courses:
-            st.warning("Aucune course trouvée pour cette réunion")
-            return []
-        
-        # On prend la première course (ou on pourrait laisser l'utilisateur choisir)
-        course = courses[0]
-        partants = course.get('partants', [])
-        
-        for partant in partants:
-            # Extraction des informations
-            cheval_info = partant.get('cheval', {})
-            jockey_info = partant.get('jockey', {})
-            entraîneur_info = partant.get('entraineur', {})
-            performances = partant.get('performances', {})
-            
-            # Statistiques de carrière
-            stats = performances.get('carriere', {})
-            stats_annee = performances.get('annee', {})
-            
-            # Cotes
-            cotes = partant.get('cotes', [])
-            cote_actuelle = cotes[0].get('valeur', 0) if cotes else 0
-            
-            # Nom et numéro
-            nom = cheval_info.get('nom', 'Inconnu')
-            numero = partant.get('numero', 0)
-            
-            # Gains (attention : en centimes !)
-            gains = stats.get('gains', 0) / 100  # Conversion en euros
-            
-            chevaux.append({
-                'Nom': nom,
-                'Numero': numero,
-                'Cote': cote_actuelle,
-                'Poids': partant.get('poids', 0),
-                'Corde': partant.get('corde', 0),
-                'Jockey': jockey_info.get('nom', ''),
-                'Entraineur': entraîneur_info.get('nom', ''),
-                'Victoires': stats.get('victoires', 0),
-                'Places': stats.get('places', 0),
-                'Gains': gains,
-                'NbCourses': stats.get('partants', 0),
-                'VictoiresAnnee': stats_annee.get('victoires', 0),
-                'GainsAnnee': stats_annee.get('gains', 0) / 100
-            })
-        
-        return chevaux
-        
-    except Exception as e:
-        st.error(f"❌ Erreur lors de l'extraction des données : {str(e)}")
-        return []
-
-def calculer_indicateurs(df):
-    """Calcule les indicateurs manquants (forme, perf, etc.)"""
-    if df.empty:
-        return df
-    
-    # Forme récente : basée sur un ratio victoires/places
-    df['Forme_recente'] = df.apply(
-        lambda row: 3.0 if row['Victoires'] > 0 else 
-                   5.0 if row['Places'] > 3 else 
-                   8.0, axis=1
-    )
-    
-    # Performance sur la distance (approximative)
-    df['Perf_distance'] = df.apply(
-        lambda row: 4.0 if row['Victoires'] >= 2 else 
-                   6.0 if row['Victoires'] >= 1 else 
-                   8.0, axis=1
-    )
-    
-    # Performance sur la piste (idem)
-    df['Perf_piste'] = df['Perf_distance']
-    
-    # Fraîcheur (nombre de courses récentes)
-    df['Fraicheur'] = df.apply(
-        lambda row: 1 if row['NbCourses'] > 0 else 3,
-        axis=1
-    )
-    
-    return df
-
-# === SIDEBAR - RECHERCHE PMU ===
 with st.sidebar:
-    st.header("🔍 Récupération PMU")
-    
-    # Sélection de la date
-    date_defaut = datetime.now().strftime('%d/%m/%Y')
-    date_course = st.date_input(
-        "Date de la réunion",
-        value=datetime.now(),
-        min_value=datetime.now() - timedelta(days=7),
-        max_value=datetime.now() + timedelta(days=2),
-        format="DD/MM/YYYY"
+    st.header("⚙️ Source de Données")
+    source_type = st.radio(
+        "Choisir l'entrée :",
+        ["Course de Démonstration", "Import Fichier CSV", "Scraping URL Web"],
+        index=0
     )
     
-    col1, col2 = st.columns(2)
-    with col1:
-        reunion = st.number_input("Réunion (R)", min_value=1, max_value=9, value=1, step=1)
-    with col2:
-        course = st.number_input("Course (C)", min_value=1, max_value=9, value=1, step=1)
-    
-    if st.button("📥 Charger les données PMU", type="primary", use_container_width=True):
-        with st.spinner("Récupération des données..."):
-            date_str = date_course.strftime('%d%m%Y')
-            donnees = appel_api_pmu(date_str, reunion)
-            
-            if donnees:
-                chevaux_api = extraire_chevaux_api(donnees)
-                if chevaux_api:
-                    df_api = pd.DataFrame(chevaux_api)
-                    df_api = calculer_indicateurs(df_api)
-                    
-                    # Ajout des colonnes manquantes
-                    for col in st.session_state.chevaux.columns:
-                        if col not in df_api.columns:
-                            df_api[col] = None
-                    
-                    st.session_state.chevaux = df_api[st.session_state.chevaux.columns]
-                    st.session_state.donnees_pmu = donnees
-                    st.success(f"✅ {len(df_api)} chevaux chargés !")
-                    st.rerun()
-    
+    df_raw = None
+    if source_type == "Course de Démonstration":
+        df_raw = load_sample_data()
+        st.success("Données de démo chargées (8 partants).")
+    elif source_type == "Import Fichier CSV":
+        uploaded_file = st.file_uploader("Fichier CSV de la course", type=["csv"])
+        if uploaded_file:
+            try:
+                df_raw = parse_uploaded_csv(uploaded_file)
+                st.success("CSV validé avec succès.")
+            except Exception as e:
+                st.error(str(e))
+    elif source_type == "Scraping URL Web":
+        url = st.text_input("URL de la course :", placeholder="https://example.com/course")
+        if st.button("Lancer l'extraction"):
+            if url:
+                with st.spinner("Scraping en cours..."):
+                    try:
+                        df_raw = fetch_web_race_data(url)
+                        st.success("Données récupérées.")
+                    except Exception as e:
+                        st.error(f"Erreur : {str(e)}")
+
     st.divider()
-    st.caption("💡 **Astuce** : L'API PMU fournit automatiquement les cotes et statistiques des chevaux.")
+    st.header("🎛️ Pondération du Modèle")
+    w_odds = st.slider("Poids Cote Marché", 0.0, 1.0, 0.40, 0.05)
+    w_cheval = st.slider("Poids Forme Cheval", 0.0, 1.0, 0.25, 0.05)
+    w_jockey = st.slider("Poids Forme Jockey", 0.0, 1.0, 0.15, 0.05)
+    w_dist = st.slider("Poids Aptitude Distance", 0.0, 1.0, 0.10, 0.05)
+    w_terr = st.slider("Poids Aptitude Terrain", 0.0, 1.0, 0.10, 0.05)
 
-# === TAB 1 : SAISIE ===
-tab1, tab2, tab3, tab4 = st.tabs(["📝 Saisie des chevaux", "⚙️ Poids des critères", "📊 Résultats", "🔬 Données brutes API"])
-
-with tab1:
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.subheader("Paramètres de la course")
-        distance = st.number_input("Distance (mètres)", min_value=1000, max_value=4000, value=2400, step=100)
-        type_piste = st.selectbox("Type de piste", ["Herbe", "PSF", "Sable"])
-        etat_terrain = st.selectbox("État du terrain", ["Bon", "Souple", "Lourd", "Collant", "Très lourd"])
-    
-    with col2:
-        st.subheader("Ajouter/Modifier un cheval")
-        with st.form("add_horse"):
-            if not st.session_state.chevaux.empty:
-                nom_existant = st.selectbox(
-                    "Ou sélectionner un cheval existant",
-                    options=["-- Nouveau cheval --"] + st.session_state.chevaux['Nom'].tolist()
-                )
-                
-                if nom_existant != "-- Nouveau cheval --":
-                    cheval_selectionne = st.session_state.chevaux[st.session_state.chevaux['Nom'] == nom_existant].iloc[0]
-                    nom = nom_existant
-                    cote_def = cheval_selectionne['Cote'] if pd.notna(cheval_selectionne['Cote']) else 10.0
-                    poids_def = cheval_selectionne['Poids'] if pd.notna(cheval_selectionne['Poids']) else 58
-                    corde_def = cheval_selectionne['Corde'] if pd.notna(cheval_selectionne['Corde']) else 5
-                    forme_def = cheval_selectionne['Forme_recente'] if pd.notna(cheval_selectionne['Forme_recente']) else 5.0
-                else:
-                    nom = ""
-                    cote_def = 10.0
-                    poids_def = 58
-                    corde_def = 5
-                    forme_def = 5.0
-            else:
-                nom = ""
-                cote_def = 10.0
-                poids_def = 58
-                corde_def = 5
-                forme_def = 5.0
-            
-            nom_input = st.text_input("Nom du cheval", value=nom)
-            
-            col_a, col_b = st.columns(2)
-            with col_a:
-                forme = st.number_input("Forme récente (moyenne des places)", min_value=1.0, max_value=20.0, value=forme_def, step=0.5)
-                perf_dist = st.number_input("Perf sur la distance", min_value=1.0, max_value=20.0, value=5.0, step=0.5)
-                perf_piste = st.number_input("Perf sur ce type de piste", min_value=1.0, max_value=20.0, value=5.0, step=0.5)
-                poids = st.number_input("Poids porté (kg)", min_value=45, max_value=75, value=int(poids_def), step=1)
-            
-            with col_b:
-                fraicheur = st.number_input("Courses dans les 30 jours", min_value=0, max_value=10, value=2, step=1)
-                cote = st.number_input("Cote", min_value=1.0, max_value=100.0, value=float(cote_def), step=0.5)
-                corde = st.number_input("Numéro de corde", min_value=1, max_value=20, value=int(corde_def), step=1)
-                jockey = st.number_input("% victoires du jockey", min_value=0, max_value=100, value=15, step=1)
-                entraineur = st.number_input("% victoires de l'entraîneur", min_value=0, max_value=100, value=12, step=1)
-            
-            submitted = st.form_submit_button("➕ Ajouter/Mettre à jour")
-            
-            if submitted and nom_input:
-                if nom_existant != "-- Nouveau cheval --" and nom_existant == nom_input:
-                    # Mise à jour
-                    idx = st.session_state.chevaux[st.session_state.chevaux['Nom'] == nom_input].index[0]
-                    st.session_state.chevaux.loc[idx] = [
-                        nom_input, None, forme, perf_dist, perf_piste,
-                        poids, jockey, entraineur, fraicheur, cote, corde,
-                        None, None, None
-                    ]
-                    st.success(f"✅ {nom_input} mis à jour !")
-                else:
-                    # Ajout
-                    nouveau = pd.DataFrame([{
-                        'Nom': nom_input,
-                        'Numero': None,
-                        'Forme_recente': forme,
-                        'Perf_distance': perf_dist,
-                        'Perf_piste': perf_piste,
-                        'Poids': poids,
-                        'Jockey': jockey,
-                        'Entraineur': entraineur,
-                        'Fraicheur': fraicheur,
-                        'Cote': cote,
-                        'Corde': corde,
-                        'Victoires': None,
-                        'Places': None,
-                        'Gains': None
-                    }])
-                    st.session_state.chevaux = pd.concat([st.session_state.chevaux, nouveau], ignore_index=True)
-                    st.success(f"✅ {nom_input} ajouté !")
-                st.rerun()
-    
-    # Affichage du tableau
-    if not st.session_state.chevaux.empty:
-        st.subheader(f"📋 Chevaux saisis ({len(st.session_state.chevaux)})")
-        
-        col_aff = st.columns([5, 1])
-        with col_aff[0]:
-            st.dataframe(st.session_state.chevaux, use_container_width=True)
-        with col_aff[1]:
-            if st.button("🗑️ Supprimer le dernier"):
-                st.session_state.chevaux = st.session_state.chevaux.iloc[:-1]
-                st.rerun()
-            if st.button("🔄 Tout effacer"):
-                st.session_state.chevaux = pd.DataFrame(columns=st.session_state.chevaux.columns)
-                st.rerun()
-
-# === TAB 2 : POIDS ===
-with tab2:
-    st.subheader("Ajustez l'importance de chaque critère")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        poids_forme = st.slider("Forme récente", 0, 50, st.session_state.poids_param['Forme_recente'])
-        poids_dist = st.slider("Performance sur la distance", 0, 50, st.session_state.poids_param['Perf_distance'])
-        poids_piste = st.slider("Performance sur la piste", 0, 50, st.session_state.poids_param['Perf_piste'])
-        poids_poids = st.slider("Poids porté", 0, 50, st.session_state.poids_param['Poids'])
-    
-    with col2:
-        poids_cote = st.slider("Cote", 0, 50, st.session_state.poids_param['Cote'])
-        poids_jockey = st.slider("Statistiques jockey", 0, 50, st.session_state.poids_param['Jockey'])
-        poids_entraineur = st.slider("Statistiques entraîneur", 0, 50, st.session_state.poids_param['Entraineur'])
-        poids_fraicheur = st.slider("Fraîcheur", 0, 50, st.session_state.poids_param['Fraicheur'])
-    
-    st.session_state.poids_param = {
-        'Forme_recente': poids_forme,
-        'Perf_distance': poids_dist,
-        'Perf_piste': poids_piste,
-        'Poids': poids_poids,
-        'Cote': poids_cote,
-        'Jockey': poids_jockey,
-        'Entraineur': poids_entraineur,
-        'Fraicheur': poids_fraicheur
+if df_raw is not None:
+    total_w = w_odds + w_cheval + w_jockey + w_dist + w_terr or 1.0
+    custom_weights = {
+        "implied_prob": w_odds / total_w,
+        "forme_cheval": w_cheval / total_w,
+        "forme_jockey": w_jockey / total_w,
+        "aptitude_distance": w_dist / total_w,
+        "aptitude_terrain": w_terr / total_w
     }
     
-    total = sum(st.session_state.poids_param.values())
-    st.info(f"📊 Total: {total}%")
-    
-    # Graphique de répartition
-    df_poids = pd.DataFrame({
-        'Critère': list(st.session_state.poids_param.keys()),
-        'Poids': list(st.session_state.poids_param.values())
-    })
-    fig = px.pie(df_poids, values='Poids', names='Critère', title="Répartition des poids")
+    model = HorseRacingModel(weights=custom_weights)
+    results = model.predict(df_raw)
+
+    col_left, col_right = st.columns([2, 1])
+
+    with col_left:
+        st.subheader("📊 Pronostic & Classement Probabiliste")
+        display_df = results[[
+            "cheval", "jockey", "cote", "prob_victoire", "prob_place", "cote_equitable", "expected_value", "explication"
+        ]].copy()
+        
+        display_df["prob_victoire"] = (display_df["prob_victoire"] * 100).round(1).astype(str) + " %"
+        display_df["prob_place"] = (display_df["prob_place"] * 100).round(1).astype(str) + " %"
+        display_df["cote_equitable"] = display_df["cote_equitable"].round(2)
+        display_df["expected_value"] = (display_df["expected_value"] * 100).round(1).astype(str) + " %"
+        
+        display_df.columns = [
+            "Cheval", "Jockey", "Cote Bookmaker", "Prob. Victoire", 
+            "Prob. Place (Top 3)", "Cote Équitable", "Expected Value (EV)", "Analyse Rationale"
+        ]
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    with col_right:
+        st.subheader("🔥 Top Value Bets (EV +)")
+        value_bets = results[results["expected_value"] > 0.05]
+        if not value_bets.empty:
+            for _, row in value_bets.iterrows():
+                st.success(
+                    f"**{row['cheval']}** — Cote : `{row['cote']}` | "
+                    f"EV : `+{(row['expected_value']*100):.1f}%`\n\n"
+                    f"_{row['explication']}_"
+                )
+        else:
+            st.info("Aucune valeur nette détectée sous ce réglage de pondération.")
+
+    st.divider()
+    st.subheader("📈 Distribution des Probabilités vs Cotes")
+    fig = px.bar(
+        results,
+        x="cheval",
+        y="prob_victoire",
+        color="expected_value",
+        color_continuous_scale="RdYlGn",
+        labels={"prob_victoire": "Probabilité de Victoire", "cheval": "Cheval", "expected_value": "EV"},
+        title="Probabilité de victoire estimée par le modèle"
+    )
     st.plotly_chart(fig, use_container_width=True)
 
-# === TAB 3 : RÉSULTATS ===
-with tab3:
-    if st.session_state.chevaux.empty:
-        st.warning("⚠️ Veuillez d'abord saisir ou charger des chevaux")
-    else:
-        if st.button("🚀 Lancer l'analyse", type="primary", use_container_width=True):
-            df = st.session_state.chevaux.copy()
-            
-            # Nettoyage des valeurs None
-            df = df.fillna({
-                'Forme_recente': 5.0,
-                'Perf_distance': 5.0,
-                'Perf_piste': 5.0,
-                'Poids': 58,
-                'Cote': 10.0,
-                'Corde': 5,
-                'Jockey': 15,
-                'Entraineur': 12,
-                'Fraicheur': 2
-            })
-            
-            # === NORMALISATION ===
-            colonnes_min = ['Forme_recente', 'Perf_distance', 'Perf_piste', 'Poids', 'Cote', 'Corde']
-            for col in colonnes_min:
-                if col in df.columns and df[col].nunique() > 1:
-                    df[f'{col}_norm'] = 1 - (df[col] - df[col].min()) / (df[col].max() - df[col].min())
-                else:
-                    df[f'{col}_norm'] = 0.5
-            
-            colonnes_max = ['Jockey', 'Entraineur', 'Fraicheur']
-            for col in colonnes_max:
-                if col in df.columns and df[col].nunique() > 1:
-                    df[f'{col}_norm'] = (df[col] - df[col].min()) / (df[col].max() - df[col].min())
-                else:
-                    df[f'{col}_norm'] = 0.5
-            
-            # === SCORE ===
-            df['Score'] = (
-                df['Forme_recente_norm'] * st.session_state.poids_param['Forme_recente'] +
-                df['Perf_distance_norm'] * st.session_state.poids_param['Perf_distance'] +
-                df['Perf_piste_norm'] * st.session_state.poids_param['Perf_piste'] +
-                df['Poids_norm'] * st.session_state.poids_param['Poids'] +
-                df['Cote_norm'] * st.session_state.poids_param['Cote'] +
-                df['Jockey_norm'] * st.session_state.poids_param['Jockey'] +
-                df['Entraineur_norm'] * st.session_state.poids_param['Entraineur'] +
-                df['Fraicheur_norm'] * st.session_state.poids_param['Fraicheur']
-            )
-            
-            # === PROBABILITÉ ===
-            exp_scores = np.exp(df['Score'] - df['Score'].max())
-            df['Probabilité'] = exp_scores / exp_scores.sum()
-            df['Probabilité %'] = (df['Probabilité'] * 100).round(1)
-            
-            # === TRI ===
-            df_pronostic = df.sort_values('Score', ascending=False).reset_index(drop=True)
-            
-            # === AFFICHAGE ===
-            st.subheader("🏆 Pronostic final")
-            
-            # Tableau
-            colonnes_affichage = ['Nom', 'Score', 'Probabilité %', 'Cote', 'Corde', 'Numero']
-            st.dataframe(
-                df_pronostic[colonnes_affichage].style.background_gradient(subset=['Score'], cmap='RdYlGn'),
-                use_container_width=True
-            )
-            
-            # Graphique
-            fig = px.bar(
-                df_pronostic,
-                x='Nom',
-                y='Probabilité %',
-                color='Probabilité %',
-                color_continuous_scale='RdYlGn',
-                title="Probabilité estimée par cheval",
-                labels={'Probabilité %': 'Probabilité (%)', 'Nom': 'Cheval'}
-            )
-            fig.update_layout(showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Top 3
-            st.subheader("📈 Classement")
-            top3 = df_pronostic.head(3)
-            
-            col_rank = st.columns(3)
-            for i in range(3):
-                with col_rank[i]:
-                    if i < len(top3):
-                        emoji = ["🥇", "🥈", "🥉"][i]
-                        st.success(f"{emoji} **{top3.iloc[i]['Nom']}**")
-                        st.metric("Probabilité", f"{top3.iloc[i]['Probabilité %']}%")
-                        st.caption(f"Cote: {top3.iloc[i]['Cote']:.1f}")
-            
-            # Détection de valeur
-            st.subheader("💡 Opportunités de valeur")
-            df_pronostic['Cote_implicite'] = 1 / df_pronostic['Probabilité']
-            df_pronostic['Valeur'] = df_pronostic['Cote'] - df_pronostic['Cote_implicite']
-            
-            valeur_positive = df_pronostic[df_pronostic['Valeur'] > 0].head(3)
-            if not valeur_positive.empty:
-                st.info("**Ces chevaux sont sous-cotés par le marché :**")
-                for _, row in valeur_positive.iterrows():
-                    st.write(f"  • **{row['Nom']}** : cote {row['Cote']:.1f} vs proba implicite {row['Cote_implicite']:.1f} → écart de **{row['Valeur']:.1f}** points")
-            else:
-                st.info("ℹ️ Aucune opportunité de valeur majeure détectée.")
-            
-            # Export
-            csv = df_pronostic.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Télécharger les résultats (CSV)",
-                data=csv,
-                file_name=f"pronostic_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                mime="text/csv"
-            )
-
-# === TAB 4 : DONNÉES BRUTES API ===
-with tab4:
-    if st.session_state.donnees_pmu:
-        st.subheader("📦 Données brutes reçues de l'API PMU")
-        
-        # Affichage structuré
-        try:
-            course = st.session_state.donnees_pmu.get('programme', {}).get('courses', [{}])[0]
-            st.json(course)
-            
-            st.divider()
-            
-            # Métadonnées de la course
-            st.subheader("📋 Métadonnées")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Réunion", course.get('reunion', {}).get('numero', 'N/A'))
-            with col2:
-                st.metric("Course", course.get('ordre', 'N/A'))
-            with col3:
-                st.metric("Distance", f"{course.get('distance', 'N/A')}m")
-            
-            # Partants
-            st.subheader("🐴 Partants")
-            partants = course.get('partants', [])
-            for p in partants:
-                st.write(f"**{p.get('numero', 'N/A')}** - {p.get('cheval', {}).get('nom', 'Inconnu')} (Cote: {p.get('cotes', [{}])[0].get('valeur', 'N/A')})")
-                
-        except Exception as e:
-            st.error(f"Erreur d'affichage : {str(e)}")
-    else:
-        st.info("ℹ️ Chargez d'abord des données via le panneau de gauche")
-
-# === FOOTER ===
-st.markdown("---")
-st.caption("🐴 Pronostic Hippique Pro v2.0 - Données PMU en temps réel")
+st.divider()
+st.caption("⚠️ **Avertissement :** Les paris hippiques sont soumis à l'aléa sportif. Ce modèle fournit des estimations statistiques relatives.")
