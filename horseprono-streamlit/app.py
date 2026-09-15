@@ -125,7 +125,7 @@ with tab1:
                 result.style.format({
                     'odds': '{:.1f}', 'p_marche': '{:.1%}', 'p_modele': '{:.1%}',
                     'edge_ratio': '{:.2f}', 'p_place_modele': '{:.1%}'
-                }).background_gradient(subset=['edge_ratio'], cmap='RdYlGn', vmin=0.5, vmax=1.5),
+                }),
                 use_container_width=True,
             )
             chart_df = result.set_index('horse_name')[['p_marche', 'p_modele']]
