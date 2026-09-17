@@ -1,0 +1,53 @@
+{
+  "model_name": "HorseProno_Quinte_V3_candidate_4plus3",
+  "status": "candidate_forward_validation",
+  "selection": {
+    "core4": {
+      "weights": {
+        "market": 0.1,
+        "top5_logit": 0.3,
+        "lambdamart": 0.5,
+        "context": 0.1
+      },
+      "max_market_top4": 2
+    },
+    "challenger_1": "best LambdaMART outside core",
+    "challenger_2": "best market remaining (stabilizer)",
+    "challenger_3": "deep edge among market rank >=10 when available",
+    "deep_edge": {
+      "top5_logit": 0.55,
+      "lambdamart": 0.25,
+      "context": 0.2,
+      "market_penalty": 0.4
+    }
+  },
+  "historical_walk_forward_58": {
+    "v3_candidate": {
+      "avg_top5_captured_in_top7": 3.2758620689655173,
+      "four_of_five_rate": 0.4482758620689655,
+      "five_of_five_rate": 0.0862068965517241
+    },
+    "v2_reference": {
+      "avg_top5_captured_in_top7": 3.293103448275862,
+      "four_of_five_rate": 0.41379310344827586,
+      "five_of_five_rate": 0.08620689655172414
+    },
+    "difference_v3_minus_v2": {
+      "avg_top5_captured_in_top7": -0.01724137931034475,
+      "four_of_five_rate": 0.03448275862068967,
+      "five_of_five_rate": -4.163336342344337e-17
+    }
+  },
+  "development30": {
+    "avg": 3.3666666666666667,
+    "four": 0.4,
+    "five": 0.1
+  },
+  "historical_benchmark28": {
+    "avg": 3.1785714285714284,
+    "four": 0.5,
+    "five": 0.0714285714285714
+  },
+  "important_note": "The 28-race benchmark has already been inspected during V3 iteration and is not a pristine holdout. Final promotion to production requires forward validation on new Quinté races.",
+  "bug_fixed": "ranker percentile normalization previously used horse number instead of field size in an exploratory script; corrected before selecting this candidate."
+}
